@@ -1,0 +1,29 @@
+// vrambw - Vulkan read bandwidth kernel (same pattern as the CUDA one).
+// Compiled into vk_read.spv.inc with: make shader   (needs glslc)
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uvec4 a[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Sink { uint sink[]; };
+
+layout(push_constant) uniform PC {
+    uint n;    // number of uvec4 (16-byte) elements
+    uint flag; // never matched: keeps the loads alive
+} pc;
+
+void main()
+{
+    uint stride = gl_NumWorkGroups.x * 256u;
+    uint i = gl_GlobalInvocationID.x;
+    uvec4 acc = uvec4(0u);
+    // 16-byte loads, 4 independent loads in flight per thread, grid-stride
+    for (; i + 3u * stride < pc.n; i += 4u * stride) {
+        acc ^= a[i];
+        acc ^= a[i + stride];
+        acc ^= a[i + 2u * stride];
+        acc ^= a[i + 3u * stride];
+    }
+    for (; i < pc.n; i += stride) acc ^= a[i];
+    uint r = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (r == pc.flag) sink[0] = r;
+}

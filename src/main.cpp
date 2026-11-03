@@ -1,6 +1,9 @@
-// vrambw - real memory bandwidth: system RAM, and (if built with CUDA) VRAM + PCIe.
+// vrambw - real memory bandwidth: system RAM, CUDA (VRAM + PCIe), Vulkan (device-local + host RAM).
 #include "ram.h"
 #include "meminfo.h"
+#ifdef HAVE_VULKAN
+#include "vk.h"
+#endif
 #ifdef HAVE_CUDA
 #include "gpu.h"
 #endif
@@ -13,7 +16,7 @@
 static void usage(const char *p)
 {
     printf("usage: %s [-d LIST] [-s MiB] [-n N]\n"
-           "  -d LIST   GPUs to test, e.g. 0 or 0,2 (default: all)\n"
+           "  -d LIST   CUDA GPUs to test, e.g. 0 or 0,2 (default: all)\n"
            "  -s MiB    VRAM buffer size (default: min(1024, 50%% of free VRAM))\n"
            "  -n N      samples per measurement, best is reported (default 20)\n",
            p);
@@ -57,7 +60,12 @@ int main(int argc, char **argv)
     gpu_run(devs, size_mib, samples);
 #else
     (void)size_mib;
-    printf("GPU   not tested: built without CUDA\n");
+    printf("CUDA  not tested: built without CUDA\n\n");
+#endif
+#ifdef HAVE_VULKAN
+    vk_run(samples, mi.peak_gbs);
+#else
+    printf("Vulkan  not tested: built without Vulkan\n");
 #endif
     return 0;
 }

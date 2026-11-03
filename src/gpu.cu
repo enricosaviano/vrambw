@@ -160,7 +160,7 @@ int gpu_run(const std::vector<int> &devs_in, size_t size_mib, int samples)
     cudaError_t err = cudaGetDeviceCount(&ndev);
     progress_clear();
     if (err != cudaSuccess || ndev == 0) {
-        printf("GPU   no usable CUDA GPU (%s)\n",
+        printf("CUDA  no usable CUDA GPU (%s)\n\n",
                err != cudaSuccess ? cudaGetErrorString(err) : "0 devices");
         return 0;
     }

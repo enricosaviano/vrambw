@@ -7,9 +7,10 @@
 | **System RAM** read bandwidth, type and channels | Speed of LLM decode when layers run on the CPU (offload) |
 | **GPU VRAM** read bandwidth (NVIDIA, CUDA) | Speed of LLM decode on the GPU; comparable with the vendor's spec sheet |
 | **PCIe** bandwidth host → GPU and GPU → host | Speed of model loading and of CPU↔GPU traffic |
+| **Vulkan** read bandwidth of any GPU (AMD, Intel, NVIDIA, also integrated) | Speed of LLM decode with Vulkan backends (llama.cpp Vulkan), e.g. on iGPUs |
 
-It is plain C++ and CUDA, like llama.cpp: no Python, no libraries, no runtime dependencies.
-It builds with CUDA 11.4, 12.6 and 12.8, and also **without CUDA** (then only the RAM test is built).
+It is plain C++, CUDA and Vulkan, like llama.cpp: no Python, no libraries, no runtime dependencies.
+It builds with CUDA 11.4, 12.6 and 12.8, and also **without CUDA**. Vulkan is optional too: tests that cannot be built or run are skipped.
 
 ---
 
@@ -29,7 +30,8 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 
 - Linux, `sh`, `make`
 - A C++ compiler: `g++`, `c++` or `clang++`
-- Optional: the CUDA toolkit (`nvcc`) and the NVIDIA driver, to test GPUs
+- Optional: the CUDA toolkit (`nvcc`) and the NVIDIA driver, to test NVIDIA GPUs with CUDA
+- Optional: the Vulkan headers (`libvulkan-dev`) to build, and a Vulkan driver to run, the Vulkan test
 
 ---
 
@@ -39,7 +41,8 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 
 1. Finds a working C++ compiler.
 2. Looks for `nvcc` in this order: `--cuda` / `--nvcc` options, `$CUDA_HOME`, `$CUDA_PATH`, `PATH`, `/usr/local/cuda`, `/opt/cuda`, `/usr/local/cuda-*` (newest first).
-3. If `nvcc` is **not found**, it prepares a **RAM-only build**. No error.
+3. If `nvcc` is **not found**, it builds without the CUDA tests. No error.
+   It also looks for the Vulkan headers; without them the Vulkan test is not built. No error either.
 4. If `nvcc` is found, it asks `nvcc` which GPU architectures it supports and builds code for all of them, plus PTX for the newest one, so future GPUs still work.
    - CUDA 11.4: up to sm_86 (Ampere), down to sm_35 (Kepler)
    - CUDA 12.6: sm_50 (Maxwell) to sm_90 (Hopper)
@@ -53,7 +56,8 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 |---|---|
 | `--cuda=DIR` | Use the CUDA toolkit in `DIR` (e.g. `/usr/local/cuda-11.4`). CUDA becomes mandatory. |
 | `--nvcc=PATH` | Use this exact `nvcc`. CUDA becomes mandatory. |
-| `--without-cuda` | Build only the RAM test, even if CUDA is installed. |
+| `--without-cuda` | Do not build the CUDA tests, even if CUDA is installed. |
+| `--without-vulkan` | Do not build the Vulkan test, even if the headers are installed. |
 | `--arch=LIST` | Build only for these GPUs, e.g. `--arch=61` (Pascal) or `--arch=61,75,86`. Much faster to compile. |
 | `--host-cxx=CXX` | C++ compiler to use, also passed to `nvcc` as host compiler (e.g. `g++-10`). |
 | `--allow-unsupported-compiler` | Let `nvcc` accept a newer `g++` than it officially supports. |
@@ -73,6 +77,7 @@ Examples:
 | `make` | Build `./vrambw` |
 | `make run` | Build and run |
 | `make clean` | Delete binary and object files |
+| `make shader` | Recompile the Vulkan shader (only after editing `src/vk_read.comp`; needs `glslc`) |
 | `make distclean` | Also delete `config.mk` |
 
 ---
@@ -89,7 +94,7 @@ Examples:
 
 | Option | Meaning | Default |
 |---|---|---|
-| `-d LIST` | GPUs to test, comma separated | all |
+| `-d LIST` | CUDA GPUs to test, comma separated (Vulkan always tests all GPUs) | all |
 | `-s MiB` | VRAM test buffer size | 1024 MiB, or half of the free VRAM if smaller |
 | `-n N` | Samples per measurement; the best one is reported | 20 (5 for RAM) |
 | `-h` | Help | |
@@ -111,7 +116,7 @@ The progress line goes to stderr and only when it is a terminal, so `./vrambw > 
 
 ## Reading the output
 
-Example (RTX 2080 Ti; the PCIe line is illustrative):
+Example (RTX 2080 Ti; the PCIe and Vulkan lines are illustrative):
 
 ```
 RAM   LPDDR5/5X-6400 (guessed), 4 x 32-bit = 128-bit (dual-channel equivalent), 16 GiB
@@ -122,6 +127,12 @@ CUDA driver 13.0, runtime 12.8, 1 GPU(s)
 GPU 0  NVIDIA GeForce RTX 2080 Ti  [0000:02:00.0]  sm_75  10.6 GiB
   VRAM  theoretical   616.0 GB/s   measured   586.5 GB/s  (95%)
   PCIe  H2D  12.20 GB/s   D2H  12.90 GB/s
+
+Vulkan  1 GPU(s) (software devices skipped)
+
+VK 0  NVIDIA GeForce RTX 2080 Ti  discrete GPU  Vulkan 1.4
+  device-local  measured   580.0 GB/s   (1024 MiB buffer)
+  host RAM      measured    12.5 GB/s   (1024 MiB buffer)
 ```
 
 | Line | Meaning |
@@ -135,6 +146,9 @@ GPU 0  NVIDIA GeForce RTX 2080 Ti  [0000:02:00.0]  sm_75  10.6 GiB
 | `VRAM measured` | **Measured** read bandwidth, and percentage of the theoretical peak |
 | `PCIe H2D` | Copy speed from host RAM to GPU (Host to Device) |
 | `PCIe D2H` | Copy speed from GPU to host RAM (Device to Host) |
+| `VK 0 ...` | Vulkan device number, name, type (integrated / discrete), Vulkan version |
+| `device-local` | GPU reading its own memory (VRAM, or the RAM reserved for an iGPU) |
+| `host RAM` | GPU reading system RAM directly (over PCIe for a discrete GPU) |
 
 **Units:** GB/s means 10⁹ bytes per second (not 2³⁰). This is the unit used by NVIDIA, AMD, Intel and memory vendors, so the numbers are directly comparable.
 
@@ -176,6 +190,20 @@ Rough reference values (real numbers are a bit below):
 | PCIe 3.0 x16 | 15.8 GB/s |
 | PCIe 4.0 x16 | 31.5 GB/s |
 | PCIe 5.0 x16 | 63 GB/s |
+
+### Vulkan (any GPU: AMD, Intel, NVIDIA, integrated or discrete)
+
+If the system has a Vulkan driver, every Vulkan GPU is tested too. Software devices such as `llvmpipe`, which run on the CPU, are skipped. This works on GPUs that CUDA does not support, for example the AMD and Intel integrated GPUs used by llama.cpp's Vulkan backend.
+
+- The method is the same as the CUDA VRAM test: a compute shader reads a buffer of up to 1 GiB, 16 bytes per load, with all threads of the GPU. Data is only read, there is a warmup, and the best sample is reported.
+- Two kinds of memory are measured:
+  - **device-local**: memory "close" to the GPU. On a discrete GPU this is VRAM. On an integrated GPU it is the part of system RAM reserved for the GPU (the "UMA frame buffer" set in the BIOS).
+  - **host RAM**: normal system memory read directly by the GPU. On a discrete GPU this goes over PCIe. On an integrated GPU it is the same RAM, reached without the reserved area.
+- For integrated GPUs the line also shows the percentage of the **RAM theoretical peak**, because their memory *is* the system RAM.
+- If a driver exposes only one kind of memory (common on Intel iGPUs), the line says `same memory as device-local (unified memory)`.
+- `libvulkan.so.1` is loaded when the program starts (with `dlopen`), not linked: the same binary also runs on machines without Vulkan, and then prints `Vulkan  not available`.
+
+The shader source is `src/vk_read.comp`. Its compiled SPIR-V is stored in `src/vk_read.spv.inc`, so building does not need a shader compiler. After editing the shader, run `make shader` (needs `glslc`).
 
 ### System RAM
 
@@ -262,6 +290,17 @@ For a model split between GPU and CPU, the CPU part runs at the speed of the **R
   - The card has modified clocks, or a mining BIOS.
 - **CPU RAM far below the theoretical value.** Common on laptop chips and APUs: the CPU cores cannot use the full memory bandwidth because the internal connection between CPU and memory controller is slower (e.g. AMD Ryzen 6000 mobile: ≈ 42 GB/s measured with 102 GB/s LPDDR5). The measured value is what the CPU can really use.
 
+### Integrated GPU vs CPU
+
+On laptops and APUs the integrated GPU often reads the system RAM **faster than the CPU cores can**, because it has a wider path to the memory controller. Example, AMD Ryzen 7 6800HS with LPDDR5-6400 (102.4 GB/s theoretical):
+
+```
+RAM   theoretical   102.4 GB/s   measured    43.4 GB/s  (42%)     <- CPU cores
+  device-local  measured    84.0 GB/s   (..., 82% of RAM theoretical)   <- Radeon 680M iGPU
+```
+
+So on this machine the upper bound for decode with a Vulkan backend on the iGPU is about twice the one on the CPU, with the same RAM.
+
 ### Several GPUs
 
 All GPUs are tested one after another, never at the same time, so they do not disturb each other.
@@ -288,13 +327,19 @@ VRAMBW_UDEV_DB=udev.txt ./vrambw
 
 These two files are all that is needed to reproduce a wrong detection on another machine.
 
-**`nvcc: not found -> building without CUDA (RAM test only)`**
+**`vulkan: headers not found -> building without Vulkan`**
+Install the Vulkan headers (`sudo apt install libvulkan-dev` on Debian/Ubuntu) and run `./configure` again. If you use the LunarG SDK, `$VULKAN_SDK/include` is searched too.
+
+**`Vulkan  not available (...)`**
+The Vulkan loader (`libvulkan1`) or a Vulkan driver is not installed: e.g. `mesa-vulkan-drivers` for AMD/Intel, or the NVIDIA driver. Check with `vulkaninfo --summary`.
+
+**`nvcc: not found -> building without CUDA`**
 CUDA is not installed or not where expected. Use `./configure --cuda=/path/to/cuda`.
 
 **Test compile fails / `unsupported GNU version`**
 The CUDA version does not accept your `g++`. Install an older one and use `--host-cxx=g++-10` (or another supported version), or try `--allow-unsupported-compiler`.
 
-**`GPU   no usable CUDA GPU (...)`**
+**`CUDA  no usable CUDA GPU (...)`**
 The program was built with CUDA but there is no NVIDIA GPU or driver, or the driver is too old for the CUDA version it was built with. The RAM result is still valid. Check `nvidia-smi`.
 
 **PCIe line shows `(pageable ...)`, and `dmesg` contains `NVRM: Failed to create a DMA mapping!`**
@@ -320,6 +365,9 @@ src/main.cpp     command line and output
 src/ram.cpp      system RAM test (plain C++, always built)
 src/meminfo.cpp  RAM type / channel detection from SMBIOS or udev
 src/gpu.cu       VRAM and PCIe tests (CUDA, built only when nvcc is found)
+src/vk.cpp       Vulkan test (built when the Vulkan headers are found)
+src/vk_read.comp Vulkan compute shader (GLSL source)
+src/vk_read.spv.inc  compiled shader, embedded in the binary (make shader)
 src/progress.h   live progress line
 ```
 

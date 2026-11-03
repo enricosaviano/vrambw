@@ -1,11 +1,12 @@
 #!/bin/sh
-# vrambw configure: finds C++ compiler and (optionally) nvcc, writes config.mk
+# vrambw configure: finds C++ compiler and (optionally) nvcc and Vulkan headers, writes config.mk
 #
-#   ./configure                         auto-detect (no nvcc -> RAM-only build)
+#   ./configure                         auto-detect (no nvcc / Vulkan -> those tests are skipped)
 #   ./configure --cuda=/usr/local/cuda-11.4
 #   ./configure --nvcc=/opt/cuda/bin/nvcc --arch=61,86
 #   ./configure --host-cxx=g++-10       C++ compiler (also host compiler for nvcc)
-#   ./configure --without-cuda          RAM-only build
+#   ./configure --without-cuda          no CUDA tests
+#   ./configure --without-vulkan        no Vulkan tests
 
 CUDA_DIR=""
 NVCC=""
@@ -13,13 +14,15 @@ ARCHS=""
 HOSTCXX=""
 EXTRA=""
 WITH_CUDA=auto
+WITH_VULKAN=auto
 
 usage() {
     cat <<EOF
 usage: ./configure [options]
   --cuda=DIR                    CUDA toolkit directory (contains bin/nvcc)
   --nvcc=PATH                   explicit nvcc path
-  --without-cuda                build only the RAM test
+  --without-cuda                do not build the CUDA tests
+  --without-vulkan              do not build the Vulkan tests
   --arch=LIST                   compute capabilities, e.g. 61 or 61,86 (default: all supported)
   --host-cxx=CXX                C++ compiler (also host compiler for nvcc), e.g. g++-10
   --allow-unsupported-compiler  pass -allow-unsupported-compiler to nvcc
@@ -32,6 +35,7 @@ for arg in "$@"; do
         --cuda=*)     CUDA_DIR="${arg#*=}"; WITH_CUDA=yes ;;
         --nvcc=*)     NVCC="${arg#*=}"; WITH_CUDA=yes ;;
         --without-cuda) WITH_CUDA=no ;;
+        --without-vulkan) WITH_VULKAN=no ;;
         --arch=*)     ARCHS=$(echo "${arg#*=}" | tr ',' ' ') ;;
         --host-cxx=*) HOSTCXX="${arg#*=}" ;;
         --allow-unsupported-compiler) EXTRA="$EXTRA -allow-unsupported-compiler" ;;
@@ -59,6 +63,28 @@ if ! $CXX -O2 -std=c++14 -pthread -o "$T/t" "$T/t.cpp" > "$T/log" 2>&1; then
 fi
 echo "c++:       $(command -v $CXX)"
 
+# --- Vulkan (headers only: libvulkan is loaded at run time with dlopen)
+HAVE_VULKAN=0
+VK_CFLAGS=""
+if [ "$WITH_VULKAN" != no ]; then
+    printf '#define VK_NO_PROTOTYPES\n#include <vulkan/vulkan.h>\n#include <dlfcn.h>\nint main(){VkInstance i=VK_NULL_HANDLE;(void)i;return dlopen("x",RTLD_NOW)!=0;}\n' > "$T/vk.cpp"
+    for inc in "" "${VULKAN_SDK:+-I$VULKAN_SDK/include}"; do
+        if $CXX -std=c++14 $inc -o "$T/vk" "$T/vk.cpp" -ldl > "$T/log" 2>&1; then
+            HAVE_VULKAN=1
+            VK_CFLAGS="$inc"
+            break
+        fi
+    done
+    if [ "$HAVE_VULKAN" = 1 ]; then
+        echo "vulkan:    headers found (library loaded at run time)"
+    elif [ "$WITH_VULKAN" = yes ]; then
+        echo "Vulkan headers not found (install libvulkan-dev or vulkan-headers)" >&2
+        exit 1
+    else
+        echo "vulkan:    headers not found -> building without Vulkan (install libvulkan-dev to enable)"
+    fi
+fi
+
 # --- nvcc
 if [ "$WITH_CUDA" != no ] && [ -z "$NVCC" ]; then
     for c in "$CUDA_DIR" "$CUDA_HOME" "$CUDA_PATH"; do
@@ -77,7 +103,7 @@ if [ "$WITH_CUDA" != no ] && { [ -z "$NVCC" ] || [ ! -x "$NVCC" ]; }; then
         exit 1
     fi
     WITH_CUDA=no
-    echo "nvcc:      not found -> building without CUDA (RAM test only)"
+    echo "nvcc:      not found -> building without CUDA"
 fi
 
 if [ "$WITH_CUDA" = no ]; then
@@ -86,6 +112,8 @@ if [ "$WITH_CUDA" = no ]; then
 HAVE_CUDA = 0
 CXX       = $CXX
 CXXFLAGS  = -O3 -std=c++14 -pthread -Wall
+HAVE_VULKAN = $HAVE_VULKAN
+VK_CFLAGS = $VK_CFLAGS
 EOF
     echo "wrote config.mk. Now run: make && ./vrambw"
     exit 0
@@ -144,6 +172,8 @@ cat > config.mk <<EOF
 HAVE_CUDA = 1
 CXX       = $CXX
 CXXFLAGS  = -O3 -std=c++14 -pthread -Wall
+HAVE_VULKAN = $HAVE_VULKAN
+VK_CFLAGS = $VK_CFLAGS
 CUDA_DIR  = $CUDA_DIR
 NVCC      = $NVCC
 CCBIN     = $CCBIN
