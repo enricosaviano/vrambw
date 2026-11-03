@@ -261,3 +261,9 @@ src/ram.cpp      system RAM test (plain C++, always built)
 src/gpu.cu       VRAM and PCIe tests (CUDA, built only when nvcc is found)
 src/progress.h   live progress line
 ```
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
