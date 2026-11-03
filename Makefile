@@ -1,7 +1,7 @@
 -include config.mk
 
 TARGET = vrambw
-OBJ    = src/main.o src/ram.o
+OBJ    = src/main.o src/ram.o src/meminfo.o
 
 ifeq ($(HAVE_CUDA),1)
 OBJ    += src/gpu.o
@@ -21,7 +21,7 @@ endif
 $(TARGET): $(OBJ)
 	$(LINK) -o $@ $(OBJ) -lpthread
 
-src/%.o: src/%.cpp src/ram.h src/gpu.h src/progress.h config.mk
+src/%.o: src/%.cpp src/ram.h src/gpu.h src/meminfo.h src/progress.h config.mk
 	$(CXX) $(CXXFLAGS) $(DEFS) -c -o $@ $<
 
 src/gpu.o: src/gpu.cu src/gpu.h src/progress.h config.mk

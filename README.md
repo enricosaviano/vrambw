@@ -4,7 +4,7 @@
 
 | What | Why it matters |
 |---|---|
-| **System RAM** read bandwidth | Speed of LLM decode when layers run on the CPU (offload) |
+| **System RAM** read bandwidth, type and channels | Speed of LLM decode when layers run on the CPU (offload) |
 | **GPU VRAM** read bandwidth (NVIDIA, CUDA) | Speed of LLM decode on the GPU; comparable with the vendor's spec sheet |
 | **PCIe** bandwidth host → GPU and GPU → host | Speed of model loading and of CPU↔GPU traffic |
 
@@ -114,7 +114,8 @@ The progress line goes to stderr and only when it is a terminal, so `./vrambw > 
 Example (RTX 2080 Ti; the PCIe line is illustrative):
 
 ```
-RAM   measured    43.6 GB/s   (4 threads, 1024 MiB)
+RAM   LPDDR5/5X-6400 (guessed), 4 x 32-bit = 128-bit (dual-channel equivalent), 16 GiB
+RAM   theoretical   102.4 GB/s   measured    43.6 GB/s  (43%)   (4 threads, 1024 MiB)
 
 CUDA driver 13.0, runtime 12.8, 1 GPU(s)
 
@@ -125,7 +126,9 @@ GPU 0  NVIDIA GeForce RTX 2080 Ti  [0000:02:00.0]  sm_75  10.6 GiB
 
 | Line | Meaning |
 |---|---|
-| `RAM measured` | Measured system RAM read bandwidth, and how many CPU threads gave the best result |
+| `RAM LPDDR5/5X-6400 ...` | Detected memory type, speed (MT/s), channels, total bus width and size (see *System RAM type and channels*) |
+| `RAM theoretical` | Theoretical RAM peak computed from the detected configuration (missing if it could not be detected) |
+| `RAM measured` | Measured system RAM read bandwidth, percentage of the theoretical peak, and how many CPU threads gave the best result |
 | `CUDA driver / runtime` | CUDA version supported by the installed driver, and CUDA version the program was built with |
 | `GPU 0 ... [0000:02:00.0]` | CUDA device number, name, **PCI bus address** (tells which physical card it is when you have several identical ones), compute capability, total VRAM |
 | `VRAM theoretical` | **Theoretical** peak = the number in marketing material |
@@ -181,7 +184,47 @@ Rough reference values (real numbers are a bit below):
 - The buffer is read by all CPU threads, then by half of them, a quarter, … down to 1 thread. The best result and its thread count are reported. Using all threads is not always fastest: Hyper-Threading/SMT siblings and the CPU's internal interconnect can make fewer threads faster.
 - Like the VRAM test it only **reads**, so it matches the pattern of CPU decode.
 
-There is no "theoretical" RAM value, because reading the memory configuration needs root. Compute it yourself:
+### System RAM type and channels (heuristic)
+
+Before the RAM test, `vrambw` tries to find out **what memory is installed**: type (DDR3, DDR3L, DDR4, DDR5, LPDDR4, LPDDR4X, LPDDR5, LPDDR5X, …), speed, number of channels and total size. From this it computes the **theoretical RAM peak**, so the RAM line can be compared with the spec sheet exactly like the VRAM line.
+
+Where the information comes from:
+
+1. The **SMBIOS table** of the BIOS/UEFI (`/sys/firmware/dmi/tables/DMI`). It describes every memory module. Only root can read it, so this is used with `sudo ./vrambw`.
+2. Without root, the **udev database** (`/run/udev/data/+dmi:id`), where systemd 248+ (Ubuntu 22.04 and newer) keeps a readable copy of the same data.
+3. If neither is available, the line says `type/channels unknown` and only the measured value is shown.
+
+Why "heuristic":
+
+- **Type.** The BIOS reports a type code, but SMBIOS has no codes for LPDDR4X, LPDDR5X or DDR3L, and older tools do not know newer codes (LPDDR5 often shows as `<OUT OF SPEC>`). In these cases the type is guessed from voltage and speed, and marked `(guessed)`:
+
+  | Voltage | Type |
+  |---|---|
+  | 0.5 V | LPDDR5 / LPDDR5X (above 6400 MT/s it must be LPDDR5X; at exactly 6400 it can be both, shown as `LPDDR5/5X`) |
+  | 0.6 V | LPDDR4X |
+  | 1.1 V | DDR5 (or LPDDR4 if soldered and ≤ 4266 MT/s) |
+  | 1.2 V | DDR4 |
+  | 1.35 V | DDR3L |
+  | 1.5 V | DDR3 |
+
+  Without voltage, the speed decides (e.g. ≥ 4400 MT/s → DDR5, 2133–3200 → DDR4).
+- **Speed.** The configured speed is used (the speed the memory really runs at). Old BIOSes (SMBIOS 2.7 and earlier) write the memory **clock** in MHz there, which is half the MT/s: DDR3-1600 appears as 800. When the configured value is about half of the rated speed, or below the minimum speed of that memory type, it is doubled.
+- **Channels.** Modules are grouped by socket, memory controller and channel, read from the slot labels written by the board vendor (`P0 CHANNEL A`, `ChannelA-DIMM0`, `Controller1-ChannelA`, `DIMM_B1`, `CPU1_DIMM_C1`, …). Two modules on the same channel (e.g. 4 DIMMs on a dual-channel desktop) count as **one** channel. Some boards also write ECC bits into the data width (72 instead of 64): these are removed, and the line says `ECC`. If no label names a channel, the program guesses and says so: boards with 1 socket and up to 4 slots are assumed **dual-channel** (`channels guessed: 4-slot board`), because desktop and laptop CPUs have 2 channels; bigger boards are assumed to have 1 module per channel (`channels guessed: 1 module per channel`), as is usual on servers.
+- **Channel names.** Desktop and server channels are 64 bits wide. LPDDR memory uses narrower channels (16 or 32 bits), so the total bus is also expressed in 64-bit units, with the word `equivalent`: 4 × 32-bit LPDDR5 = 128-bit = **dual-channel equivalent**, the same bandwidth class as two DDR5 DIMMs.
+
+Examples of the description line:
+
+```
+RAM   DDR4-3200, 2 x 64-bit = 128-bit (dual-channel), 64 GiB
+RAM   DDR5-6000, 2 x 64-bit = 128-bit (dual-channel), 32 GiB
+RAM   LPDDR5/5X-6400 (guessed), 4 x 32-bit = 128-bit (dual-channel equivalent), 16 GiB
+RAM   LPDDR4X-4267, 8 x 16-bit = 128-bit (dual-channel equivalent), 16 GiB
+RAM   DDR3L-1866, 4 x 64-bit = 256-bit (quad-channel), 32 GiB
+RAM   DDR4-2933, 6 x 64-bit = 384-bit (hexa-channel), 96 GiB
+RAM   DDR4-3200, 16 x 64-bit = 1024-bit (2 sockets x octa-channel), 512 GiB
+```
+
+The theoretical peak is:
 
 ```
 peak GB/s = MT/s × total bus width in bytes
@@ -228,6 +271,23 @@ GPU numbers follow CUDA's order. To know which physical card is which, use the P
 
 ## Troubleshooting
 
+**`RAM   type/channels unknown: SMBIOS not readable (run as root for details)`**
+The memory description needs SMBIOS data. Run `sudo ./vrambw`. Without root it only works with systemd 248 or newer.
+
+**Wrong RAM type or channel count**
+The detection relies on what the BIOS writes in SMBIOS, which is sometimes incomplete or wrong. Check with `sudo dmidecode -t memory` (fields `Type`, `Configured Memory Speed`, `Data Width`, `Bank Locator`, `Locator`). The measured bandwidth is always correct, because it does not depend on this.
+For debugging, `vrambw` can read the memory data from a file instead of the system:
+
+```sh
+sudo cat /sys/firmware/dmi/tables/DMI > dmi.bin      # raw SMBIOS table
+VRAMBW_DMI=dmi.bin ./vrambw
+
+cp /run/udev/data/+dmi:id udev.txt                 # udev database
+VRAMBW_UDEV_DB=udev.txt ./vrambw
+```
+
+These two files are all that is needed to reproduce a wrong detection on another machine.
+
 **`nvcc: not found -> building without CUDA (RAM test only)`**
 CUDA is not installed or not where expected. Use `./configure --cuda=/path/to/cuda`.
 
@@ -258,6 +318,7 @@ configure        detects compiler and CUDA, writes config.mk
 Makefile         build rules (reads config.mk)
 src/main.cpp     command line and output
 src/ram.cpp      system RAM test (plain C++, always built)
+src/meminfo.cpp  RAM type / channel detection from SMBIOS or udev
 src/gpu.cu       VRAM and PCIe tests (CUDA, built only when nvcc is found)
 src/progress.h   live progress line
 ```

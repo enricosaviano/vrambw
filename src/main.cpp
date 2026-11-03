@@ -1,5 +1,6 @@
 // vrambw - real memory bandwidth: system RAM, and (if built with CUDA) VRAM + PCIe.
 #include "ram.h"
+#include "meminfo.h"
 #ifdef HAVE_CUDA
 #include "gpu.h"
 #endif
@@ -38,10 +39,18 @@ int main(int argc, char **argv)
         }
     }
 
+    MemInfo mi = detect_memory();
+    printf("RAM   %s\n", describe_memory(mi).c_str());
+    fflush(stdout);
+
     int nt = 0;
     size_t rb = 0;
     double ram = bench_ram(std::min(samples, 5), &nt, &rb);
-    printf("RAM   measured %7.1f GB/s   (%d threads, %zu MiB)\n\n", ram, nt, rb >> 20);
+    if (mi.peak_gbs > 0)
+        printf("RAM   theoretical %7.1f GB/s   measured %7.1f GB/s  (%.0f%%)   (%d threads, %zu MiB)\n\n",
+               mi.peak_gbs, ram, 100.0 * ram / mi.peak_gbs, nt, rb >> 20);
+    else
+        printf("RAM   measured %7.1f GB/s   (%d threads, %zu MiB)\n\n", ram, nt, rb >> 20);
     fflush(stdout);
 
 #ifdef HAVE_CUDA
