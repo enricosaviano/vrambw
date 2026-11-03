@@ -8,9 +8,10 @@
 | **GPU VRAM** read bandwidth (NVIDIA, CUDA) | Speed of LLM decode on the GPU; comparable with the vendor's spec sheet |
 | **PCIe** bandwidth host → GPU and GPU → host | Speed of model loading and of CPU↔GPU traffic |
 | **Vulkan** read bandwidth of any GPU (AMD, Intel, NVIDIA, also integrated) | Speed of LLM decode with Vulkan backends (llama.cpp Vulkan), e.g. on iGPUs |
+| **ROCm** (HIP) VRAM read bandwidth and PCIe of AMD GPUs | Same as CUDA, for AMD cards and APUs used with llama.cpp ROCm/HIP |
 
-It is plain C++, CUDA and Vulkan, like llama.cpp: no Python, no libraries, no runtime dependencies.
-It builds with CUDA 11.4, 12.6 and 12.8, and also **without CUDA**. Vulkan is optional too: tests that cannot be built or run are skipped.
+It is plain C++, CUDA, HIP and Vulkan, like llama.cpp: no Python and no extra libraries.
+It builds with CUDA 11.4, 12.6 and 12.8, and also **without CUDA**. ROCm and Vulkan are optional too: tests that cannot be built or run are skipped.
 
 ---
 
@@ -32,6 +33,7 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 - A C++ compiler: `g++`, `c++` or `clang++`
 - Optional: the CUDA toolkit (`nvcc`) and the NVIDIA driver, to test NVIDIA GPUs with CUDA
 - Optional: the Vulkan headers (`libvulkan-dev`) to build, and a Vulkan driver to run, the Vulkan test
+- Optional: ROCm (`hipcc`), to test AMD GPUs with HIP
 
 ---
 
@@ -43,6 +45,7 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 2. Looks for `nvcc` in this order: `--cuda` / `--nvcc` options, `$CUDA_HOME`, `$CUDA_PATH`, `PATH`, `/usr/local/cuda`, `/opt/cuda`, `/usr/local/cuda-*` (newest first).
 3. If `nvcc` is **not found**, it builds without the CUDA tests. No error.
    It also looks for the Vulkan headers; without them the Vulkan test is not built. No error either.
+   It looks for ROCm (`hipcc` in `--rocm`, `$ROCM_PATH`, `/opt/rocm` or `PATH`) and builds for the common AMD GPUs plus the ones in this machine. Without ROCm the ROCm test is not built.
 4. If `nvcc` is found, it asks `nvcc` which GPU architectures it supports and builds code for all of them, plus PTX for the newest one, so future GPUs still work.
    - CUDA 11.4: up to sm_86 (Ampere), down to sm_35 (Kepler)
    - CUDA 12.6: sm_50 (Maxwell) to sm_90 (Hopper)
@@ -58,6 +61,9 @@ That's all. `./configure` finds the compiler and CUDA by itself.
 | `--nvcc=PATH` | Use this exact `nvcc`. CUDA becomes mandatory. |
 | `--without-cuda` | Do not build the CUDA tests, even if CUDA is installed. |
 | `--without-vulkan` | Do not build the Vulkan test, even if the headers are installed. |
+| `--rocm=DIR` | Use ROCm in `DIR` (e.g. `/opt/rocm-6.3.2`). ROCm becomes mandatory. |
+| `--without-rocm` | Do not build the ROCm test, even if ROCm is installed. |
+| `--rocm-arch=LIST` | Build only for these AMD GPUs, e.g. `--rocm-arch=gfx1035` or `gfx1100,gfx90a`. Faster to compile. |
 | `--arch=LIST` | Build only for these GPUs, e.g. `--arch=61` (Pascal) or `--arch=61,75,86`. Much faster to compile. |
 | `--host-cxx=CXX` | C++ compiler to use, also passed to `nvcc` as host compiler (e.g. `g++-10`). |
 | `--allow-unsupported-compiler` | Let `nvcc` accept a newer `g++` than it officially supports. |
@@ -116,7 +122,7 @@ The progress line goes to stderr and only when it is a terminal, so `./vrambw > 
 
 ## Reading the output
 
-Example (RTX 2080 Ti; the PCIe and Vulkan lines are illustrative):
+Example (RTX 2080 Ti, built without ROCm; the PCIe and Vulkan lines are illustrative):
 
 ```
 RAM   LPDDR5/5X-6400 (guessed), 4 x 32-bit = 128-bit (dual-channel equivalent), 16 GiB
@@ -127,6 +133,8 @@ CUDA driver 13.0, runtime 12.8, 1 GPU(s)
 GPU 0  NVIDIA GeForce RTX 2080 Ti  [0000:02:00.0]  sm_75  10.6 GiB
   VRAM  theoretical   616.0 GB/s   measured   586.5 GB/s  (95%)
   PCIe  H2D  12.20 GB/s   D2H  12.90 GB/s
+
+ROCm  not tested: built without ROCm
 
 Vulkan  1 GPU(s) (software devices skipped)
 
@@ -146,6 +154,7 @@ VK 0  NVIDIA GeForce RTX 2080 Ti  discrete GPU  Vulkan 1.4
 | `VRAM measured` | **Measured** read bandwidth, and percentage of the theoretical peak |
 | `PCIe H2D` | Copy speed from host RAM to GPU (Host to Device) |
 | `PCIe D2H` | Copy speed from GPU to host RAM (Device to Host) |
+| `ROCm 0 ...` | ROCm device number, name, PCI address, AMD GPU target (`gfx...`), integrated / discrete, memory (see *ROCm*) |
 | `VK 0 ...` | Vulkan device number, name, type (integrated / discrete), Vulkan version |
 | `device-local` | GPU reading its own memory (VRAM, or the RAM reserved for an iGPU) |
 | `host RAM` | GPU reading system RAM directly (over PCIe for a discrete GPU) |
@@ -190,6 +199,25 @@ Rough reference values (real numbers are a bit below):
 | PCIe 3.0 x16 | 15.8 GB/s |
 | PCIe 4.0 x16 | 31.5 GB/s |
 | PCIe 5.0 x16 | 63 GB/s |
+
+### ROCm (AMD GPUs)
+
+On machines with ROCm installed, AMD GPUs are also tested with HIP, the CUDA-like API of ROCm, which llama.cpp uses for its ROCm/HIP backend.
+
+- The code is the same as the CUDA test, with HIP names: VRAM read bandwidth with a read-only kernel on a buffer of up to 1 GiB, then host ↔ GPU copies with pinned memory.
+- **Theoretical VRAM peak (heuristic):** for HBM cards (Instinct MI series) the usual formula (clock × 2 × bus) works. For GDDR6 cards ROCm may report a memory clock from which the data rate is 16 × clock instead of 2 × clock. The program uses the usual formula when it is consistent with the measurement (measured ≤ peak), otherwise the GDDR6 one; if neither fits, no theoretical value is shown. This has not been verified yet on discrete AMD cards.
+- **Integrated GPUs** (APUs such as Ryzen 6000/7000/8000 or Strix Halo): the "VRAM" is the system RAM, so the theoretical value is the **RAM theoretical peak**, and the line says `(iGPU: system RAM)`. The copy line is labelled `copy` instead of `PCIe`, because host and GPU memory are the same RAM.
+- Unlike CUDA and Vulkan, a ROCm build **needs the ROCm runtime** (`libamdhip64.so`) when it runs. The binary looks for it in the ROCm directory found by `./configure`. Build with `--without-rocm` for a binary that also runs on machines without ROCm.
+
+Example, Ryzen 7 6800HS (Radeon 680M, gfx1035, LPDDR5-6400):
+
+```
+ROCm  HIP runtime 6.3, 1 GPU(s)
+
+ROCm 0  AMD Radeon Graphics  [0000:04:00.0]  gfx1035  integrated  10.0 GiB
+  VRAM  theoretical   102.4 GB/s   measured    89.7 GB/s  (88%)  (iGPU: system RAM)
+  copy  H2D  40.27 GB/s   D2H  40.31 GB/s   (iGPU: copies inside system RAM, no PCIe)
+```
 
 ### Vulkan (any GPU: AMD, Intel, NVIDIA, integrated or discrete)
 
@@ -296,7 +324,8 @@ On laptops and APUs the integrated GPU often reads the system RAM **faster than 
 
 ```
 RAM   theoretical   102.4 GB/s   measured    43.4 GB/s  (42%)     <- CPU cores
-  device-local  measured    84.0 GB/s   (..., 82% of RAM theoretical)   <- Radeon 680M iGPU
+  VRAM  theoretical   102.4 GB/s   measured    89.7 GB/s  (88%)          <- Radeon 680M iGPU, ROCm
+  device-local  measured    84.0 GB/s   (..., 82% of RAM theoretical)   <- Radeon 680M iGPU, Vulkan
 ```
 
 So on this machine the upper bound for decode with a Vulkan backend on the iGPU is about twice the one on the CPU, with the same RAM.
@@ -326,6 +355,15 @@ VRAMBW_UDEV_DB=udev.txt ./vrambw
 ```
 
 These two files are all that is needed to reproduce a wrong detection on another machine.
+
+**`hipcc: not found -> building without ROCm`**
+ROCm is not installed, or not in `/opt/rocm`. Use `./configure --rocm=/path/to/rocm`, or set `ROCM_PATH`.
+
+**`ROCm  no usable ROCm GPU (...)`**
+Common causes: the user is not in the `render` and `video` groups (`/dev/kfd` not accessible), or the GPU is not supported by this ROCm version. For some unsupported consumer GPUs, setting `HSA_OVERRIDE_GFX_VERSION` (e.g. `HSA_OVERRIDE_GFX_VERSION=10.3.0 ./vrambw` for RDNA2) makes ROCm treat them as a supported model.
+
+**`error while loading shared libraries: libamdhip64.so.6`**
+The binary was built with ROCm but ROCm is missing on this machine. Rebuild here, or build with `./configure --without-rocm`.
 
 **`vulkan: headers not found -> building without Vulkan`**
 Install the Vulkan headers (`sudo apt install libvulkan-dev` on Debian/Ubuntu) and run `./configure` again. If you use the LunarG SDK, `$VULKAN_SDK/include` is searched too.
@@ -365,6 +403,7 @@ src/main.cpp     command line and output
 src/ram.cpp      system RAM test (plain C++, always built)
 src/meminfo.cpp  RAM type / channel detection from SMBIOS or udev
 src/gpu.cu       VRAM and PCIe tests (CUDA, built only when nvcc is found)
+src/hip.cpp      ROCm test (HIP, built when hipcc is found)
 src/vk.cpp       Vulkan test (built when the Vulkan headers are found)
 src/vk_read.comp Vulkan compute shader (GLSL source)
 src/vk_read.spv.inc  compiled shader, embedded in the binary (make shader)

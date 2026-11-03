@@ -19,7 +19,17 @@ DEFS   += -DHAVE_VULKAN
 LIBS   += -ldl
 endif
 
-HDRS = src/ram.h src/gpu.h src/meminfo.h src/vk.h src/progress.h
+ifeq ($(HAVE_ROCM),1)
+OBJ    += src/hip.o
+DEFS   += -DHAVE_ROCM
+ifeq ($(HAVE_CUDA),1)
+LIBS   += -L$(ROCM_DIR)/lib -lamdhip64 -Xlinker -rpath -Xlinker $(ROCM_DIR)/lib
+else
+LIBS   += -L$(ROCM_DIR)/lib -lamdhip64 -Wl,-rpath,$(ROCM_DIR)/lib
+endif
+endif
+
+HDRS = src/ram.h src/gpu.h src/hip.h src/meminfo.h src/vk.h src/progress.h
 
 ifeq ($(wildcard config.mk),)
 all:
@@ -35,6 +45,9 @@ src/%.o: src/%.cpp $(HDRS) config.mk
 	$(CXX) $(CXXFLAGS) $(VK_CFLAGS) $(DEFS) -c -o $@ $<
 
 src/vk.o: src/vk_read.spv.inc
+
+src/hip.o: src/hip.cpp src/hip.h src/progress.h config.mk
+	$(HIPCC) -O3 -std=c++14 -fPIC $(HIP_ARCH) -c -o $@ $<
 
 src/gpu.o: src/gpu.cu src/gpu.h src/progress.h config.mk
 	$(NVCC) $(NVFLAGS) $(CCBIN) $(GENCODE) -c -o $@ $<

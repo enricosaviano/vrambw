@@ -1,8 +1,11 @@
-// vrambw - real memory bandwidth: system RAM, CUDA (VRAM + PCIe), Vulkan (device-local + host RAM).
+// vrambw - real memory bandwidth: system RAM, CUDA and ROCm (VRAM + PCIe), Vulkan (device-local + host RAM).
 #include "ram.h"
 #include "meminfo.h"
 #ifdef HAVE_VULKAN
 #include "vk.h"
+#endif
+#ifdef HAVE_ROCM
+#include "hip.h"
 #endif
 #ifdef HAVE_CUDA
 #include "gpu.h"
@@ -61,6 +64,11 @@ int main(int argc, char **argv)
 #else
     (void)size_mib;
     printf("CUDA  not tested: built without CUDA\n\n");
+#endif
+#ifdef HAVE_ROCM
+    hip_run(samples, mi.peak_gbs);
+#else
+    printf("ROCm  not tested: built without ROCm\n\n");
 #endif
 #ifdef HAVE_VULKAN
     vk_run(samples, mi.peak_gbs);

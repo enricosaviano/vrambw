@@ -7,6 +7,7 @@
 #   ./configure --host-cxx=g++-10       C++ compiler (also host compiler for nvcc)
 #   ./configure --without-cuda          no CUDA tests
 #   ./configure --without-vulkan        no Vulkan tests
+#   ./configure --rocm=/opt/rocm --rocm-arch=gfx1035   ROCm (AMD) with one target
 
 CUDA_DIR=""
 NVCC=""
@@ -15,6 +16,10 @@ HOSTCXX=""
 EXTRA=""
 WITH_CUDA=auto
 WITH_VULKAN=auto
+WITH_ROCM=auto
+ROCM_DIR=""
+HIPCC=""
+ROCM_ARCHS=""
 
 usage() {
     cat <<EOF
@@ -23,6 +28,9 @@ usage: ./configure [options]
   --nvcc=PATH                   explicit nvcc path
   --without-cuda                do not build the CUDA tests
   --without-vulkan              do not build the Vulkan tests
+  --rocm=DIR                    ROCm directory (contains bin/hipcc), e.g. /opt/rocm-6.3.2
+  --without-rocm                do not build the ROCm tests
+  --rocm-arch=LIST              AMD GPU targets, e.g. gfx1035 or gfx1100,gfx90a (default: common ones + this machine)
   --arch=LIST                   compute capabilities, e.g. 61 or 61,86 (default: all supported)
   --host-cxx=CXX                C++ compiler (also host compiler for nvcc), e.g. g++-10
   --allow-unsupported-compiler  pass -allow-unsupported-compiler to nvcc
@@ -36,6 +44,9 @@ for arg in "$@"; do
         --nvcc=*)     NVCC="${arg#*=}"; WITH_CUDA=yes ;;
         --without-cuda) WITH_CUDA=no ;;
         --without-vulkan) WITH_VULKAN=no ;;
+        --rocm=*)     ROCM_DIR="${arg#*=}"; HIPCC="${arg#*=}/bin/hipcc"; WITH_ROCM=yes ;;
+        --without-rocm) WITH_ROCM=no ;;
+        --rocm-arch=*) ROCM_ARCHS=$(echo "${arg#*=}" | tr "," " ") ;;
         --arch=*)     ARCHS=$(echo "${arg#*=}" | tr ',' ' ') ;;
         --host-cxx=*) HOSTCXX="${arg#*=}" ;;
         --allow-unsupported-compiler) EXTRA="$EXTRA -allow-unsupported-compiler" ;;
@@ -85,6 +96,66 @@ if [ "$WITH_VULKAN" != no ]; then
     fi
 fi
 
+# --- ROCm / HIP (AMD GPUs)
+HAVE_ROCM=0
+HIP_ARCH=""
+if [ "$WITH_ROCM" != no ]; then
+    if [ -z "$HIPCC" ]; then
+        for c in "$ROCM_DIR" "$ROCM_PATH" /opt/rocm; do
+            if [ -n "$c" ] && [ -x "$c/bin/hipcc" ]; then HIPCC="$c/bin/hipcc"; [ -z "$ROCM_DIR" ] && ROCM_DIR="$c"; break; fi
+        done
+        [ -z "$HIPCC" ] && HIPCC=$(command -v hipcc 2>/dev/null)
+    fi
+    if [ -n "$HIPCC" ] && [ -x "$HIPCC" ]; then
+        if [ -z "$ROCM_DIR" ]; then
+            ROCM_DIR=$("$HIPCC" --version 2>/dev/null | sed -n 's/^InstalledDir: \(.*\)\/llvm\/bin$/\1/p')
+            [ -z "$ROCM_DIR" ] && ROCM_DIR=/opt/rocm
+        fi
+        # archs: requested, else common AMD GPUs + the ones in this machine
+        if [ -z "$ROCM_ARCHS" ]; then
+            NATIVE=""
+            for t in "$ROCM_DIR/llvm/bin/amdgpu-arch" "$ROCM_DIR/bin/offload-arch"; do
+                if [ -x "$t" ]; then NATIVE=$("$t" 2>/dev/null | sort -u); break; fi
+            done
+            ROCM_ARCHS="gfx900 gfx906 gfx908 gfx90a gfx942 gfx1010 gfx1012 gfx1030 gfx1031 gfx1032 gfx1035 gfx1036 gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1200 gfx1201"
+            for a in $NATIVE; do
+                case " $ROCM_ARCHS " in *" $a "*) ;; *) ROCM_ARCHS="$ROCM_ARCHS $a" ;; esac
+            done
+        fi
+        printf '#include <hip/hip_runtime.h>\n__global__ void k(int*p){p[0]=1;}\nint main(){int n=0;return hipGetDeviceCount(&n)==hipSuccess?0:0;}\n' > "$T/t.hip.cpp"
+        hip_test() { "$HIPCC" -fPIC $1 -o "$T/th" "$T/t.hip.cpp" > "$T/log" 2>&1; }
+        flags() { for a in $1; do printf -- '--offload-arch=%s ' "$a"; done; }
+        # drop the archs this compiler does not know (fast: ask llc for its target list)
+        KNOWN=""
+        [ -x "$ROCM_DIR/llvm/bin/llc" ] && KNOWN=$("$ROCM_DIR/llvm/bin/llc" -march=amdgcn -mcpu=help 2>&1 | grep -o -E '^[[:space:]]+gfx[0-9a-f]+' | tr -d ' \t')
+        if [ -n "$KNOWN" ]; then
+            OK=""
+            for a in $ROCM_ARCHS; do
+                for k in $KNOWN; do [ "$a" = "$k" ] && { OK="$OK $a"; break; }; done
+            done
+            ROCM_ARCHS=$(echo $OK)
+        fi
+        # one test compile + link, for the first target only (all targets would take ~30 s)
+        if [ -n "$ROCM_ARCHS" ] && hip_test "--offload-arch=${ROCM_ARCHS%% *}"; then
+            HAVE_ROCM=1
+            HIP_ARCH=$(flags "$ROCM_ARCHS")
+            echo "hipcc:     $HIPCC"
+            echo "rocm arch: $ROCM_ARCHS"
+        elif [ "$WITH_ROCM" = yes ]; then
+            cat "$T/log" >&2
+            echo "ROCm test compile failed" >&2
+            exit 1
+        else
+            echo "hipcc:     test compile failed -> building without ROCm (see ./configure --rocm=DIR)"
+        fi
+    elif [ "$WITH_ROCM" = yes ]; then
+        echo "hipcc not found (${ROCM_DIR:-?}/bin/hipcc)" >&2
+        exit 1
+    else
+        echo "hipcc:     not found -> building without ROCm"
+    fi
+fi
+
 # --- nvcc
 if [ "$WITH_CUDA" != no ] && [ -z "$NVCC" ]; then
     for c in "$CUDA_DIR" "$CUDA_HOME" "$CUDA_PATH"; do
@@ -114,6 +185,10 @@ CXX       = $CXX
 CXXFLAGS  = -O3 -std=c++14 -pthread -Wall
 HAVE_VULKAN = $HAVE_VULKAN
 VK_CFLAGS = $VK_CFLAGS
+HAVE_ROCM = $HAVE_ROCM
+ROCM_DIR  = $ROCM_DIR
+HIPCC     = $HIPCC
+HIP_ARCH  = $HIP_ARCH
 EOF
     echo "wrote config.mk. Now run: make && ./vrambw"
     exit 0
@@ -174,6 +249,10 @@ CXX       = $CXX
 CXXFLAGS  = -O3 -std=c++14 -pthread -Wall
 HAVE_VULKAN = $HAVE_VULKAN
 VK_CFLAGS = $VK_CFLAGS
+HAVE_ROCM = $HAVE_ROCM
+ROCM_DIR  = $ROCM_DIR
+HIPCC     = $HIPCC
+HIP_ARCH  = $HIP_ARCH
 CUDA_DIR  = $CUDA_DIR
 NVCC      = $NVCC
 CCBIN     = $CCBIN
