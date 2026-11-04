@@ -63,9 +63,11 @@ double bench_ram(int samples, int *nthreads_out, size_t *bytes_out)
         for (int t = 0; t < k; t++)
             th.emplace_back([&, t]() {
                 uint64_t acc = 0, r;
-                for (int s = t; s < nt; s += k) {
-                    ram_read(buf + s * per, per, reps, &r);
-                    acc ^= r;
+                for (int rep = 0; rep < reps; ++rep) {
+                    for (int s = t; s < nt; s += k) {
+                        ram_read(buf + s * per, per, 1, &r);
+                        acc = (acc * 0x9E3779B97F4A7C15ull) ^ r;
+                    }
                 }
                 res[t] = acc;
             });
